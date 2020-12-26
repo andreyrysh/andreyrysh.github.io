@@ -1,0 +1,900 @@
+﻿<HTML>
+	<HEAD>
+		<TITLE>Optimal juggling JS-1.0b</TITLE>
+	<STYLE>
+		#wrap{
+			width: 450px
+			height: auto;
+			float: left;
+			padding: 10px 5px 0 5px;
+		}
+	</STYLE>
+	<SCRIPT language="JavaScript">
+		// переменные для доступа к панели рисования
+		var myCanvas; 
+		var context;
+		
+		// переменные для старт/стопа анимации
+		var timerID = null;
+		var timerRunning = false;
+		
+		//переменные для анимации
+		var fpb			= 32; // frames per beat - число фреймов в бите
+		var slowdownFactor	= 2;	//замедление
+		var scaleFactor = 1.0;		//масштаб 1см = scaleFactor пикселей
+		var freq		= 1000*slowdownFactor/fpb;	// Frequency - частота обновления кадров
+		
+		//переменные определяющие жонглирование
+		var g			= 980.0;	//980.0*1;//ускорение свободного падения
+		var numOfBalls	= 5;	//количество мячей
+		var HT			= 0.9;	//доля удерживания
+		var ballDiam	= 15;	//диаметр мяча
+		var errDiam		= 15;	//диаметр зоны ошибки
+		var tau			= 0.5;	//частота бросков с одной руки
+		
+		var MaxHeight	= 600;	// максимальная высота подброса мяча
+		var MaxWidth	= 300;	// максимальная ширина паттерна
+		
+		var RPoint = 0; 
+		var LPoint = 0;
+		var scope  = 0;
+		var scopeX = 0;
+		var scopeY = 0;
+
+		var props	= [];		// массив мячей
+		var FrameNum = 0;
+		
+		//переменные по Джеку Кальвану
+		var E	= 0;	//scoop
+		var P	= 0;	//preScoop
+		var F	= 0;	//flight - длина перелета
+		var Omega	= 0; //среднее число мячей находящихс в воздухе, приходящихся на одну дугу. f/tau
+		var f = 0; //время полета (время нахождения мяча в воздухе, от броска до кетча)
+		var Vh = 0;//горизонтальная скорость броска
+		var Vv = 0;//вертикальная скорость броска
+		var H = 0; //высота броска
+		
+		var theta = 0;
+		
+		var OptimEqual = 0;
+		var Vthrow = 0;
+		var throwAngle = 0;
+		
+		//переменные отрисовки
+		var flagDrawBallInHand = false;
+		var flagCollisionBallInHand = false;
+		var fixedTau = false;
+		
+		//
+		var Ball = function () {
+			this.x			= 0;	// x-координата центра мяча
+			this.y			= 0;	// y-координата центра мяча
+			//this.SSThrow	= 0;	// SiteSwap Throw - сайствопный бросок которым был брошен мяч
+			this.start		= false;
+			//this.f			= 0.0;	// Время которое мяч проведет в воздухе
+			this.CurrTime	= 0.0;	// Время прошедшее от момента выброса мяча
+			this.StartPosX	= 0;	// Start Position X - стартовая точка вылета мяча
+			this.StartPosY	= 0;	// Start Position Y - стартовая точка вылета мяча
+			this.EndPosX	= 0;	// End Position X - конечная точка прилета мяча
+			this.EndPosY	= 0;	// End Position Y - конечная точка прилета мяча
+			this.rightDirection = 0;// направление движения: 1 - направо, 0 - налево
+			this.Collision	= 0;	// столкновение с другим мячом: 1 - есть, 0 - нет
+		}		
+		
+		Ball.prototype.calcCoord = function() {	//МЕТОД - вычисление текущей координаты мяча
+			if ( this.CurrTime < f ) {	//ЕСЛИ мяч еще в воздухе
+					this.x = this.StartPosX + (this.EndPosX-this.StartPosX)*this.CurrTime/f;	//вычисляем текущую x-координату
+					//this.y = g*(f-this.CurrTime)*this.CurrTime/2;	//альтернативный способ вычисления Y-координаты
+					this.y = Vv*this.CurrTime - g*this.CurrTime*this.CurrTime/2;	//вычисляем текущую y-координату
+			} else { //ИНАЧЕ мяч в руке
+				//присваиваем мячу координаты руки в которую он прилетел
+				if( this.rightDirection ) {	//ЕСЛИ мяч летит направо
+					this.x = RPoint - scope*(this.CurrTime - f)/(HT*tau/2);	
+				} else {	//ИНАЧЕ мяч летит налево
+					this.x = LPoint + scope*(this.CurrTime - f)/(HT*tau/2);	
+				}
+				this.y = scopeY*(1 - (this.CurrTime - f)/(HT*tau/2));
+			}
+		}
+		
+		function calcCollision() {	//определение столкновения мячей
+			var distance = 0;
+			for(var i = 0; i<props.length; i++) {
+				props[i].Collision = 0;
+			}
+		
+			for (var i = 0; i<props.length; i++) {
+				for ( var j = i+1; j< props.length; j++) {
+					if( ((props[i].CurrTime < f) && (props[j].CurrTime < f)) || flagCollisionBallInHand ) {
+						distance = (props[i].x - props[j].x)*(props[i].x - props[j].x)
+								 + (props[i].y - props[j].y)*(props[i].y - props[j].y);
+						if ((errDiam)*(errDiam) > distance ) {
+							props[i].Collision = 2;
+							props[j].Collision = 2;
+						}							 
+						if ((ballDiam)*(ballDiam) > distance ) {
+							props[i].Collision = 1;
+							props[j].Collision = 1;
+						}
+					}
+				}
+			}
+		}
+		
+		Ball.prototype.drawErrZone = function() {  //МЕТОД - отрисовка зоны ошибки
+			var centerY = 0;
+			var centerX = 0;
+			
+			centerX = (MaxWidth - W*scaleFactor)/2;
+			centerY = (MaxHeight - H*scaleFactor)/2;
+			
+			//рисуем зону ошибки
+			context.beginPath();
+			switch (this.Collision) {
+				case 0:
+					context.fillStyle	= "rgb(200, 200, 255)";
+					context.strokeStyle	= "rgb(  0,   0, 255)";	//синий цвет
+					break;
+				case 1:
+					context.fillStyle	= "rgb(255, 200, 200)";	
+					context.strokeStyle	= "rgb(255,   0,   0)";	//красный цвет
+					break;
+				case 2:
+					context.fillStyle	= "rgb(200, 255, 200)";	
+					context.strokeStyle	= "rgb(  0, 255,   0)";	//Зеленый цвет
+			}			
+			
+			context.arc(this.x*scaleFactor+centerX, MaxHeight-(this.y*scaleFactor+centerY), errDiam*scaleFactor/2, 0, 2 * Math.PI, true);
+			context.fill();	
+		}		
+
+		Ball.prototype.draw = function() {  //МЕТОД - отрисовка мяча
+			var lineW = 2;
+			context.lineWidth = lineW;
+			var centerY = 0;
+			var centerX = 0;
+			
+			centerX = (MaxWidth - W*scaleFactor)/2;
+			centerY = (MaxHeight - H*scaleFactor)/2;
+			
+			//рисуем мяч
+			context.beginPath();
+			switch (this.Collision) {
+				case 0:
+				case 2:
+					context.fillStyle	= "rgb(150, 150, 255)";
+					context.strokeStyle	= "rgb(  0,   0, 255)";	//синий цвет
+					break;
+				case 1:
+					context.fillStyle	= "rgb(255, 150, 150)";	
+					context.strokeStyle	= "rgb(255,   0,   0)";	//красный цвет
+					break;
+			}
+			
+			context.arc(this.x*scaleFactor+centerX, MaxHeight-(this.y*scaleFactor+centerY), ballDiam*scaleFactor/2-lineW/2, 0, 2 * Math.PI, true);
+			context.stroke();
+			context.fill();
+		}
+		
+		function drawArcs () {	//отрисовка траекторий полета мячей
+			var x = 0;
+			var y = 0;
+
+			var centerY = 0;
+			var centerX = 0;
+			
+			context.strokeStyle	= "rgb( 100, 100, 100)";	//серый цвет
+			
+			centerX = (MaxWidth - W*scaleFactor)/2;
+			centerY = (MaxHeight - H*scaleFactor)/2;
+			
+			context.lineWidth = 1;
+			context.beginPath();
+			
+			/*ЕСЛИ число мячей чётное, то мячи летят в противоположном направлении*/
+			var xDirection = 1;
+			if (numOfBalls%2 == 0){
+				xDirection = -1;
+			}
+			
+			/*отрисовка дуги для левой руки*/
+			x= LPoint+scope;
+			y = 0;
+			context.moveTo(x*scaleFactor+centerX, MaxHeight-(y*scaleFactor+centerY));	
+			for(var i = 0; i<f; i+=0.1){
+				x = LPoint+scope + xDirection*Vh*i;
+				y = Vv*i - g*i*i/2;
+				context.lineTo( x*scaleFactor+centerX, MaxHeight-(y*scaleFactor+centerY));
+			}
+			x = LPoint+scope + xDirection*Vh*f;
+			y = Vv*f - g*f*f/2;
+			context.lineTo( x*scaleFactor+centerX, MaxHeight-(y*scaleFactor+centerY));
+
+			/*отрисовка дуги для правой руки*/
+			x = RPoint-scope;
+			y = 0;
+			context.moveTo(x*scaleFactor+centerX, MaxHeight-(y*scaleFactor+centerY));	
+			for(var i = 0; i<f; i+=0.1){
+				x = RPoint-scope - xDirection*Vh*i;
+				y = Vv*i - g*i*i/2;
+				context.lineTo( x*scaleFactor+centerX, MaxHeight-(y*scaleFactor+centerY));
+			}
+			x = RPoint-scope - xDirection*Vh*f;
+			y = Vv*f - g*f*f/2;
+			context.lineTo( x*scaleFactor+centerX, MaxHeight-(y*scaleFactor+centerY));
+			context.stroke();			
+		}
+		
+		/*в текущей программе вроде не нужна, но на всякий случай сохраню образец кода
+			может еще пригодится*/
+		function drawB(sString) {
+			context.beginPath();
+			context.lineWidth = 2;
+			
+			context.font = "18px Arial";
+			context.fillStyle = "Black";
+			context.textBaseline = "middle";
+			context.textAlign = "center";
+			context.fillText(sString, 50, 50);
+		}
+		
+		function initiateProps() {	//инициация мячей
+			var prop = 0;	//текущий номер мяча в массиве мячей
+			props.length = 0; //зачищаем массив мячей
+			// для начала - все мячи выкидываются с разницей в 1 такт
+			for(prop = 0; prop<numOfBalls; prop++) { 
+				props[prop] = new Ball();
+				props[prop].start = false;
+				props[prop].CurrTime = prop*tau/2.0;
+			}
+		}		
+
+		function animateFrame() { //анимация паттерна
+			var fading = 1 - document.getElementById("fading").value/10; //параметр прозрачности/затухания 
+
+			//замазываем предыдущий кадр
+			context.fillStyle = "rgba( 255, 255, 255, " + fading + ")";
+			context.fillRect( 0, 0, 300, MaxHeight);
+
+			//вычисление координат мячей/отрисовка мячей
+			FrameNum += 1.0/fpb;
+			if ( FrameNum >= tau/2.0 ) {
+				FrameNum -= tau/2.0;
+				RightHand = !RightHand;
+			}
+
+			
+			for(var prop = 0; prop< props.length; prop++) {
+				props[prop].CurrTime += 1.0/fpb; // увеличиваем время полета
+				if (props[prop].CurrTime >= numOfBalls*tau/2) { //при переходе через период
+					props[prop].CurrTime -= numOfBalls*tau/2;	//начинаем отсчет с начала
+					props[prop].start = true;
+
+					if( RightHand ) {	//ЕСЛИ бросаем с правой руки
+						props[prop].StartPosX = RPoint-scope;
+					} else {	//ИНАЧЕ бросаем с левой руки
+						props[prop].StartPosX = LPoint+scope;
+					}
+					
+					if (	( RightHand && (numOfBalls%2 == 0) )
+						 || (!RightHand && (numOfBalls%2 == 1) ) ) {
+						props[prop].EndPosX = RPoint;
+						props[prop].rightDirection = 1;
+					} else {
+						props[prop].EndPosX = LPoint;
+						props[prop].rightDirection = 0;				
+					}
+				}
+				
+				if( props[prop].start) { //ЕСЛИ мяч брошен
+					props[prop].calcCoord();//вычисляем координаты мяча
+				}
+			}
+			
+			calcCollision();
+			//вначале рисуем зону ошибки - все зоны ошибки находятся на заднем плане
+			for(var i = 0; i<props.length; i++) {
+				if( props[i].start && props[i].CurrTime<=f) {
+					props[i].drawErrZone();
+				}
+			}
+
+			//затем отрисовываем мячи - таким образом мячи всегда находятся на переденем плане
+			for(var i = 0; i<props.length; i++) {
+				if( props[i].start  && ( props[i].CurrTime<=f  || flagDrawBallInHand)) {
+					props[i].draw();
+				}
+			}
+
+			//и поверх мячей отрисовываем траекторию всего полета
+			drawArcs();
+		}
+
+		/*Вычисление основных переменных жонглирования - расстояние полета, угол руки и т.п.*/
+		function calcVariables() {
+			FrameNum = 0; //HT*tau/2.0; //двигается первой
+
+			RightHand = true;	//первый бросок с правой руки
+			initiateProps(); //инициация мячей
+			
+			Omega = props.length/2-HT/2;
+			F = Omega*errDiam;
+			
+			/*не самое честное преобразование, но на практике никакой разницы все равно наблюдаться не будет, а присвоить g пренебрежимо малое значение значительно проще, чем отдельно расписывать значение параметров под одно особое значение g*/
+			if ( g == 0){
+				g = 0.003;
+			}
+			var h = 4*errDiam/g/tau/tau;
+			
+			if( props.length%2) {
+				P = errDiam*Math.sqrt(h*h+1);
+			} else {
+				P = errDiam*Math.sqrt(h*h+1); //Math.sqrt(h*h+1);
+				if (P > F+errDiam){
+					P = F+errDiam; //ДОДУМАТЬ! по идее можно меньше.
+				}
+			}
+			f = Omega*tau;
+			
+			Vh = F/f;
+			
+			
+			fixedTau = document.getElementById("fix_tau").checked;
+
+			if ( !fixedTau ) { 
+				if( props.length%2) {
+					theta = Math.atan(2*Vh*Vh/(g*F));
+				} else {
+					theta = 0;
+				}
+			}
+			
+			//theta = 8*Math.PI/180; //2.30*Math.PI/180;
+			
+			
+			if( props.length%2 && theta!=0) {
+				h = F + P*Math.sin(theta)*Math.sin(theta);
+				H = h*h/(4*F*Math.tan(theta)); //H = g*f*f/8; (при theta = 0)
+			} else {
+				//H = g*(tau*Omega)*(tau*Omega)/8;
+				H = g*f*f/8;
+			}
+			Vv = Math.sqrt(2*g*H);
+			
+			
+			
+			
+			/*если значение производной высоты от времени на момент окончания полета положительно, значит мяч не перелетает пик траектории, и реальная высота паттерна меньше*/
+			if( (Vv - g*f) > 0 ) {
+				H = Vv*f - g*f*f/2;
+			}
+			
+			if( props.length%2) {
+				E = P*Math.cos(theta); //scope
+			} else {
+				E = F;
+			}
+			
+			scopeX = E*Math.cos(theta);	//E; 				
+			scopeY = E*Math.sin(theta);	//P*Math.sin(theta);
+			
+			//новое исчисление _НАЧАЛО
+			var Hnew;
+			H = 1/(2*g)*Math.pow((scopeY/f + g*f/2), 2);
+			
+			Vv = Math.sqrt(2*g*H);
+
+			/*если значение производной высоты от времени на момент окончания полета положительно, значит мяч не перелетает пик траектории, и реальная высота паттерна меньше*/
+			if( (Vv - g*f) > 0 ) {
+				H = Vv*f - g*f*f/2;
+			}
+			//новое исчисление _СТАРОЕ
+			//var diffH = Hnew-H;
+			
+			Vthrow = Math.sqrt(Vh*Vh+Vv*Vv);
+			throwAngle = Math.atan(Vv/Vh);
+			
+			//оптимальное соотношение
+			OptimEqual = 2*Vh*(F - E*Math.cos(theta) - ballDiam/2) + (g*tau*tau/4)*(Vv - g*tau/4);
+			
+			if( props.length%2) {
+				scope = scopeX;		//E;//ballDiam*Math.sqrt(h*h+1);
+				RPoint = F+scopeX;	//F+E;
+			} else {
+				scope = F;
+				RPoint = F+P;
+				scopeY = 0;
+			}
+			W = RPoint-LPoint;
+		}
+		
+		function getVariables() {
+			//Вводимые переменные
+			document.getElementById(  "td_g").innerText	= "gravity = "					+ (g/100).toFixed(2)	+ " m/s/s";
+			document.getElementById(  "td_b").innerText	= "balls = "					+ numOfBalls;
+			document.getElementById( "td_dr").innerText	= "dwell ratio = "				+ (HT/2).toFixed(2);
+			document.getElementById( "td_hp").innerText	= "hand period = "				+ tau.toFixed(3)		+ " s";
+			document.getElementById( "td_bd").innerText	= "ball diameter = "			+ ballDiam				+ " cm";
+			document.getElementById("td_ezd").innerText	= "error zone diameter = "		+ errDiam				+ " cm";
+			
+			//Расчитанные переменные
+			document.getElementById("td_dba").innerText	= "distance between arc = "		+ (P/100).toFixed(2)	+ " m";
+			document.getElementById ("td_fd").innerText	= "flight distance = "			+ (F/100).toFixed(2)	+ " m";
+			document.getElementById("td_bpa").innerText	= "balls ins flight per arc = "	+ Omega.toFixed(2);
+			document.getElementById( "td_th").innerText	= "throw height = "				+ (H/100).toFixed(2)	+ " m";
+			document.getElementById( "td_ft").innerText	= "flight time = "				+ f.toFixed(2)			+ " s";
+			document.getElementById( "td_dt").innerText	= "dwell time = "				+ (HT*tau/2).toFixed(2)	+ " s";			
+			document.getElementById("td_hmd").innerText	= "    distance = = "			+ (E/100).toFixed(2)	+ " m";
+			document.getElementById("td_hma").innerText	= "    angle = "				+ (theta*180/Math.PI).toFixed(2) + " °";
+			document.getElementById( "td_tv").innerText	= "    velocity = "				+ (Vthrow/100).toFixed(2)	+ " m/s"; 
+			document.getElementById( "td_ta").innerText	= "    angle = "				+ (throwAngle*180/Math.PI).toFixed(2) + " °";			
+			//переменные анимации
+			document.getElementById( "td_sf").innerText	= "scaleFactor = "			+ scaleFactor.toFixed(1)	+ " px/cm"; //потом 
+			document.getElementById("td_sdf").innerText	= "slowdownFactor = "		+ slowdownFactor.toFixed(1);
+			document.getElementById("td_fpb").innerText	= "fpb = "					+ fpb + " frames/beat";
+			/*
+			document.getElementById("message").value	=	"OptimEqual = "			+ OptimEqual.toFixed(3)	+
+															"\nOptimal natural tau = "		+ tau.toFixed(4)+
+															"\nOptimal overnatural tau = "	+ tau.toFixed(4);
+			*/
+		}
+		
+		function startAnimation() { //запуск анимации
+			stopAnimation(); //убеждаемся что анимация остановлена
+			
+			document.getElementById("btn_g+").disabled			= true;
+			document.getElementById("btn_g-").disabled			= true;
+			document.getElementById("btn_balls+").disabled 		= true;
+			document.getElementById("btn_balls-").disabled 		= true;
+			document.getElementById("btn_dr+").disabled			= true;
+			document.getElementById("btn_dr-").disabled			= true;
+			document.getElementById("btn_handperiod+").disabled = true;
+			document.getElementById("btn_handperiod-").disabled = true;
+			
+			myCanvas = document.getElementById("myCanvas"); //получаем доступ к "панели рисования"
+			context = myCanvas.getContext("2d"); //получаем доступ к контексту
+
+			fixedTau = false;
+			
+			calcVariables();
+			getVariables();
+			
+			timerID = setInterval(animateFrame, freq); //запускаем анимацию
+			timerRunning = true; //выставляем признак что анимация запущена
+		}
+
+		function stopAnimation() {
+			if (timerRunning) {	//ЕСЛИ анимация запущена
+				context.clearRect( 0, 0, MaxWidth, MaxHeight);
+				clearInterval(timerID);	//останавливаем анимацию
+				timerRunning = false;	//снимаем признак запуска анимации   <INPUT id="fading" type="checkbox">
+			}
+			
+			document.getElementById("btn_g+").disabled			= false;
+			document.getElementById("btn_g-").disabled			= false;
+			document.getElementById("btn_balls+").disabled 		= false;
+			document.getElementById("btn_balls-").disabled 		= false;
+			document.getElementById("btn_dr+").disabled			= false;
+			document.getElementById("btn_dr-").disabled			= false;
+			document.getElementById("btn_handperiod+").disabled = false;
+			document.getElementById("btn_handperiod-").disabled = false;
+		}
+
+		function calcAndGetVariables(){
+			calcVariables();
+			getVariables();
+		}
+	
+	function btnDrawOptTau() {
+		fixedTau = document.getElementById("fix_tau").checked;
+
+		var flag = true;
+		var max, min, middle;
+		var NegativeResult = 0;
+		
+		var x1, x2;
+		var y1, y2;
+		
+		var a, b;
+		a = 1; //+1
+		
+		x1 = 0.001;
+		while(true){
+			tau = x1;
+			calcVariables();
+			y1 = OptimEqual;
+
+			if(y1 < 0){
+				flag = false;
+				NegativeResult = x1;
+				break;
+			}
+			
+			x2 = x1 + 0.001;
+			
+			tau = x2;
+			calcVariables();
+			y2 = OptimEqual;
+			
+			a = (y2-y1)/(x2-x1);
+			b = y1 - a*x1;
+			
+			x1 = -b/a;
+		}
+		
+		tau = x1;
+		calcVariables();
+
+		/*поиски варианта с "нормальной" скоростью*/
+		if ( document.getElementById("natural_tau").checked || (a>0 && fixedTau) ) {
+			min = NegativeResult;
+			max = 4.0;
+		
+			flag = true;
+			while (flag) {
+				middle = (max + min)/2.0;
+				tau = middle;
+				calcVariables();
+				if ( (OptimEqual <= 0.001) && (OptimEqual >=0 ) ){
+					flag = false;			
+				} else {
+					if(OptimEqual > 0) {
+						max = middle;
+					}
+					if (OptimEqual < 0) {
+						min = middle;
+					}
+				}
+			}
+			getVariables();
+		}
+		startAnimation();
+	}
+	
+	function btnGravityDec() {
+		if( g > 0) {
+			g-=10;
+		}
+		getVariables();
+	}
+	
+	function btnGravityInc() {
+		g+=10;
+		getVariables();
+	}
+	
+	function btnBallsDec() {
+		if( numOfBalls > 2) {
+			numOfBalls--;
+		}
+		document.getElementById("btn_optTau").disabled	= !(numOfBalls % 2);
+		getVariables();
+	}
+	
+	function btnBallsInc() {
+		numOfBalls++;
+		getVariables();
+		document.getElementById("btn_optTau").disabled	= !(numOfBalls % 2);
+	}
+	
+	function btnDwellRatioDec() {
+		if (HT >= 0.02) {
+			HT -= 0.02;
+		}
+		getVariables();
+	}
+	
+	function btnDwellRatioInc() {
+		if (HT <= 1.98) {
+			HT += 0.02;
+		}
+		getVariables();
+	}
+	
+	function btnHandPeriodDec() {
+		if (tau > 0.010) { //0,005
+			tau -= 0.005;
+		}
+		getVariables();
+	}
+	
+	function btnHandPeriodInc() {
+		tau += 0.005;
+		getVariables();
+	}
+	
+	function btnBallDiamDec() {
+		if (ballDiam > 1) {
+			ballDiam--;
+		}
+		getVariables();
+	}
+	
+	function btnBallDiamInc() {
+		ballDiam++;
+		if(ballDiam > errDiam) {
+			errDiam++;
+		}
+		getVariables();
+	}
+	
+	function btnErrZoneDec() {
+		if(errDiam > ballDiam) {
+			errDiam--;
+		}
+		getVariables();
+	}
+	
+	function btnErrZoneInc() {
+		errDiam++;
+		getVariables();
+	}
+
+	function btnScaleFactorDec() {
+		if (scaleFactor > 0.5) {
+			scaleFactor -= 0.5;
+		}
+		getVariables();
+	}
+
+	function btnScaleFactorInc() {
+		scaleFactor += 0.5;
+		getVariables();
+	}
+	
+	function btnSlowdownDec() {
+		if( slowdownFactor  > 0.5) {
+			slowdownFactor -= 0.5;
+		}
+		
+		clearInterval(timerID);	//останавливаем анимацию
+		freq		= 1000*slowdownFactor/fpb;
+		timerID = setInterval(animateFrame, freq); //запускаем анимацию
+		
+		getVariables();
+	}
+	
+	function btnSlowdownInc() {
+		slowdownFactor += 0.5;
+		
+		clearInterval(timerID);	//останавливаем анимацию
+		freq		= 1000*slowdownFactor/fpb;
+		timerID = setInterval(animateFrame, freq); //запускаем анимацию
+
+		getVariables();
+	}
+	
+	function btnFpbDec() {
+		if( fpb > 1) {
+			fpb = fpb >> 1;
+		}
+		clearInterval(timerID);	//останавливаем анимацию
+		freq		= 1000*slowdownFactor/fpb;
+		timerID = setInterval(animateFrame, freq); //запускаем анимацию
+
+		getVariables();
+	}
+	
+	function btnFpbInc() {
+		if( fpb < 256) {
+			fpb = fpb << 1;
+		}
+		clearInterval(timerID);	//останавливаем анимацию
+		freq		= 1000*slowdownFactor/fpb;
+		timerID = setInterval(animateFrame, freq); //запускаем анимацию
+
+		getVariables();
+	}
+	
+	function chDrawBallInHand() { //отрисовка мяча в руке
+		flagDrawBallInHand = document.getElementById("ch1").checked;
+		if (!flagDrawBallInHand) {
+			flagCollisionBallInHand = flagDrawBallInHand;
+			document.getElementById("ch2").checked = document.getElementById("ch2").checked;
+		}
+		getVariables();
+	}
+	
+	function chCollisionBallInHand() {	//вычисление столкновений с мячом в руке
+		flagCollisionBallInHand = document.getElementById("ch2").checked;
+	}
+	
+	</SCRIPT>
+	</HEAD>
+	<BODY onload = "calcAndGetVariables()">
+		<H1>Optimal juggling JS v.1.0b</H1>
+		<DIV id="wrap">
+			<TABLE>
+				<tbody>
+					<!--Изменяемые параметры-->
+					<TR>
+						<TD id="td_g">
+							gravity = X.XX m/s/s
+						</TD>
+						<TD>
+							<BUTTON id="btn_g-" onclick="btnGravityDec()">-</BUTTON>
+							<BUTTON id="btn_g+" onclick="btnGravityInc()">+</BUTTON>
+						</TD>
+					</TR>
+					<TR>
+						<TD id="td_b">
+							balls = X
+						</TD>
+						<TD>
+							<BUTTON id="btn_balls-" onclick="btnBallsDec()">-</BUTTON>
+							<BUTTON id="btn_balls+" onclick="btnBallsInc()">+</BUTTON>
+						</TD>
+					</TR>
+					<TR>
+						<TD id="td_dr">
+							dwell ratio = X
+						</TD>
+						<TD>
+							<BUTTON id="btn_dr-" onclick="btnDwellRatioDec()">-</BUTTON>
+							<BUTTON id="btn_dr+" onclick="btnDwellRatioInc()">+</BUTTON>
+						</TD>
+					</TR>
+					<TR>
+						<TD id="td_hp">
+							hand period = X s
+						</TD>
+						<TD>
+							<BUTTON id="btn_handperiod-" onclick="btnHandPeriodDec()">-</BUTTON>
+							<BUTTON id="btn_handperiod+" onclick="btnHandPeriodInc()">+</BUTTON>
+						</TD>
+					</TR>
+					<TR>
+						<TD id="td_bd">
+							ball diameter = X cm
+						</TD>
+						<TD>
+							<BUTTON id="btn_balldiam-" onclick="btnBallDiamDec()">-</BUTTON>
+							<BUTTON id="btn_balldiam+" onclick="btnBallDiamInc()">+</BUTTON>
+						</TD>
+					</TR>
+					<TR>
+						<TD id="td_ezd">
+							error zone diameter = X cm
+						</TD>
+						<TD>
+							<BUTTON id="btn_errzone-" onclick="btnErrZoneDec()">-</BUTTON>
+							<BUTTON id="btn_errzone+" onclick="btnErrZoneInc()">+</BUTTON>
+						</TD>
+					</TR>
+		
+					<!--Вычисляемые параметры-->
+					<TR>
+						<TD id="td_dba">
+							distance between arc = X.XX m
+						</TD>
+					</TR>		
+					<TR>
+						<TD id="td_fd">
+							flight distance = X.XX m
+						</TD>
+					</TR>					
+					<TR>
+						<TD id="td_bpa">
+							balls in flight per arc = X.XX
+						</TD>
+					</TR>
+					<TR>
+						<TD id="td_th">
+							throw height = X.XX m
+						</TD>
+					</TR>
+					<TR>
+						<TD id="td_ft">
+							flight time = X.XX s
+						</TD>
+					</TR>		
+					<TR>
+						<TD id="td_dt">
+							dwell time = X.XX s
+						</TD>
+					</TR>		
+					<TR>
+						<TD>
+							hand move:
+						</TD>
+					</TR>					
+					<TR>
+						<TD id="td_hmd">
+							&nbsp;&nbsp;&nbsp;&nbsp;distance = X.XX m
+						</TD>
+					</TR>	
+					<TR>
+						<TD id="td_hma">
+							&nbsp;&nbsp;&nbsp;&nbsp;angle = X.XX &deg;
+						</TD>
+					</TR>					
+					<TR>
+						<TD>
+							throw:
+						</TD>
+					</TR>					
+					<TR>
+						<TD id="td_tv">
+							&nbsp;&nbsp;&nbsp;&nbsp;velocity = X.XX m/s
+						</TD>
+					</TR>
+					<TR>
+						<TD id="td_ta">
+							&nbsp;&nbsp;&nbsp;&nbsp;angle = X.XX &deg;
+						</TD>
+					</TR>		
+				</tbody>
+			</TABLE>
+			<BUTTON id="btnStart" onclick="startAnimation()" >START</BUTTON>
+			<BUTTON id="btnStop" onclick="stopAnimation()" >STOP</BUTTON>
+			<TABLE>
+				<tbody>
+					<TR>
+						<TD id="td_sf">
+							ScaleFactor = X.X cm/px
+						</TD>
+						<TD>
+							<BUTTON id="btn_sf-" onclick="btnScaleFactorDec()">-</BUTTON>
+							<BUTTON id="btn_sf+" onclick="btnScaleFactorInc()">+</BUTTON>
+						</TD>
+					</TR>
+					<TR>
+						<TD id="td_fpb">
+							fpb = X
+						</TD>
+						<TD>
+							<BUTTON id="btn_fpb-" onclick="btnFpbDec()">-</BUTTON>
+							<BUTTON id="btn_fpb+" onclick="btnFpbInc()">+</BUTTON>
+						</TD>
+					</TR>
+					<TR>
+						<TD id="td_sdf">
+							SlowdownFactor = X.X
+						</TD>
+						<TD>
+							<BUTTON id="btn_sdf-" onclick="btnSlowdownDec()">-</BUTTON>
+							<BUTTON id="btn_sdf+" onclick="btnSlowdownInc()">+</BUTTON>
+						</TD>
+					</TR>
+					<TR>
+						<TD>
+							Затухание (fadeout)
+						</TD>
+					</TR>
+					<TR>
+						<TD colspan="2">
+							<INPUT  id="fading" type="range" min="0" max="10" step="1" value="5">
+						</TD>
+					</TR>
+					<TR>
+						<TD>
+							<BUTTON id="btn_optTau" onclick="btnDrawOptTau()">Поиск макс. допустимой скорости<br> (минимального hand period)</BUTTON>
+						</TD>
+					</TR>
+					<TR>
+						<TD colspan="2">
+							<input type="checkbox" id="ch1" onclick="chDrawBallInHand()"> отрисовка мяча в руке
+						</TD>
+					</TR>
+					<TR>
+						<TD colspan="2">
+							<input type="checkbox" id="ch2" onclick="chCollisionBallInHand()"> столкновение с мячом в руке
+						</TD>
+					</TR>
+					<TR>
+						<TD colspan="2">
+							Поиск оптимального тау<br>
+							<input name="dzen" type="radio" id="fix_tau"> без изменения theta при изменении тау<br>
+							<input name="dzen" type="radio" id="natural_tau" checked> с учетом изменения theta<br>
+						</TD>
+					</TR>				
+				</tbody>
+			</TABLE>
+
+			message:<br>
+			<TEXTAREA id="message"></TEXTAREA>
+
+		</DIV>
+			<CANVAS id="myCanvas" width = "400" height="600"></CANVAS>
+	</BODY>
+</HTML>
